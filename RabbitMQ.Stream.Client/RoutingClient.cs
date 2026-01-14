@@ -97,6 +97,7 @@ namespace RabbitMQ.Stream.Client
             while (broker.Host != advertisedHost || broker.Port != uint.Parse(advertisedPort))
             {
                 attemptNo++;
+                logger?.LogDebug($"broker.Host={broker.Host} broker.Port={broker.Port} advertised_host={advertisedHost} advertised_port={advertisedPort} didn't match")
                 await client.Close("advertised_host or advertised_port doesn't match").ConfigureAwait(false);
 
                 client = await routing
