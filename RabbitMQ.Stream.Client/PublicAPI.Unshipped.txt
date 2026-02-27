@@ -1,3 +1,11 @@
+RabbitMQ.Stream.Client.DnsAddressResolver
+RabbitMQ.Stream.Client.DnsAddressResolver.DnsAddressResolver(System.Net.DnsEndPoint endPoint) -> void
+RabbitMQ.Stream.Client.DnsAddressResolver.Enabled.get -> bool
+RabbitMQ.Stream.Client.DnsAddressResolver.Enabled.set -> void
+RabbitMQ.Stream.Client.DnsAddressResolver.EndPoint.get -> System.Net.EndPoint
+RabbitMQ.Stream.Client.DnsAddressResolver.EndPoint.set -> void
+RabbitMQ.Stream.Client.DnsAddressResolver.Resolve(string address, int port) -> System.Net.EndPoint
+RabbitMQ.Stream.Client.DnsAddressResolver.ResolveAsync(string address, int port) -> System.Threading.Tasks.Task<System.Net.EndPoint>
 abstract RabbitMQ.Stream.Client.AbstractEntity.Close() -> System.Threading.Tasks.Task<RabbitMQ.Stream.Client.ResponseCode>
 abstract RabbitMQ.Stream.Client.AbstractEntity.DeleteEntityFromTheServer(bool ignoreIfAlreadyDeleted = false) -> System.Threading.Tasks.Task<RabbitMQ.Stream.Client.ResponseCode>
 abstract RabbitMQ.Stream.Client.AbstractEntity.DumpEntityConfiguration() -> string
@@ -29,12 +37,14 @@ RabbitMQ.Stream.Client.AddressResolver.Enabled.get -> bool
 RabbitMQ.Stream.Client.AddressResolver.Enabled.set -> void
 RabbitMQ.Stream.Client.AddressResolver.EndPoint.get -> System.Net.EndPoint
 RabbitMQ.Stream.Client.AddressResolver.EndPoint.set -> void
-RabbitMQ.Stream.Client.AddressResolver.Resolve(string address, int host) -> System.Net.EndPoint
+RabbitMQ.Stream.Client.AddressResolver.Resolve(string address, int port) -> System.Net.EndPoint
+RabbitMQ.Stream.Client.AddressResolver.ResolveAsync(string address, int port) -> System.Threading.Tasks.Task<System.Net.EndPoint>
 RabbitMQ.Stream.Client.AddressResolverDynamic
 RabbitMQ.Stream.Client.AddressResolverDynamic.AddressResolverDynamic(System.Func<string, int, System.Net.EndPoint> resolveFunction) -> void
 RabbitMQ.Stream.Client.AddressResolverDynamic.Enabled.get -> bool
 RabbitMQ.Stream.Client.AddressResolverDynamic.Enabled.set -> void
-RabbitMQ.Stream.Client.AddressResolverDynamic.Resolve(string address, int host) -> System.Net.EndPoint
+RabbitMQ.Stream.Client.AddressResolverDynamic.Resolve(string address, int port) -> System.Net.EndPoint
+RabbitMQ.Stream.Client.AddressResolverDynamic.ResolveAsync(string address, int port) -> System.Threading.Tasks.Task<System.Net.EndPoint>
 RabbitMQ.Stream.Client.AlreadyClosedException
 RabbitMQ.Stream.Client.AlreadyClosedException.AlreadyClosedException(string s) -> void
 RabbitMQ.Stream.Client.AuthMechanism
@@ -166,7 +176,7 @@ RabbitMQ.Stream.Client.HashRoutingMurmurStrategy.Route(RabbitMQ.Stream.Client.Me
 RabbitMQ.Stream.Client.HeartBeatHandler.HeartBeatHandler(System.Func<System.Threading.Tasks.ValueTask<bool>> sendHeartbeatFunc, System.Func<string, string, System.Threading.Tasks.Task<RabbitMQ.Stream.Client.CloseResponse>> close, int heartbeat, Microsoft.Extensions.Logging.ILogger<RabbitMQ.Stream.Client.HeartBeatHandler> logger = null) -> void
 RabbitMQ.Stream.Client.IAddressResolver
 RabbitMQ.Stream.Client.IAddressResolver.Enabled.get -> bool
-RabbitMQ.Stream.Client.IAddressResolver.Resolve(string address, int host) -> System.Net.EndPoint
+RabbitMQ.Stream.Client.IAddressResolver.ResolveAsync(string address, int port) -> System.Threading.Tasks.Task<System.Net.EndPoint>
 RabbitMQ.Stream.Client.IClient.ClientId.get -> string
 RabbitMQ.Stream.Client.IClient.ClientId.init -> void
 RabbitMQ.Stream.Client.IClient.Consumers.get -> System.Collections.Generic.IDictionary<byte, (string, RabbitMQ.Stream.Client.ConsumerEvents)>
