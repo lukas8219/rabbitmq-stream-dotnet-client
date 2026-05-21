@@ -12,6 +12,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace RabbitMQ.Stream.Client
 {
+    /// <summary>
+    /// Configuration for connecting to a RabbitMQ Stream and creating a <see cref="StreamSystem"/>.
+    /// </summary>
     public record StreamSystemConfig : INamedEntity
     {
         internal void Validate()
@@ -27,9 +30,24 @@ namespace RabbitMQ.Stream.Client
             }
         }
 
+        /// <summary>
+        /// Username for authentication. Default is "guest".
+        /// </summary>
         public string UserName { get; set; } = "guest";
+
+        /// <summary>
+        /// Password for authentication. Default is "guest".
+        /// </summary>
         public string Password { get; set; } = "guest";
+
+        /// <summary>
+        /// Virtual host to use. Default is "/".
+        /// </summary>
         public string VirtualHost { get; set; } = "/";
+
+        /// <summary>
+        /// Heartbeat interval for the connection. Default is 1 minute.
+        /// </summary>
         public TimeSpan Heartbeat { get; set; } = TimeSpan.FromMinutes(1);
 
         /// <summary>
@@ -37,16 +55,33 @@ namespace RabbitMQ.Stream.Client
         /// </summary>
         public SslOption Ssl { get; set; } = new();
 
+        /// <summary>
+        /// List of broker endpoints to connect to. The client tries each in order until one succeeds.
+        /// Default is localhost on port 5552 (stream protocol port).
+        /// </summary>
         public IList<EndPoint> Endpoints { get; set; } =
             new List<EndPoint> { new IPEndPoint(IPAddress.Loopback, 5552) };
 
+        /// <summary>
+        /// Optional resolver to translate stream leader addresses (e.g. for load balancers or DNS).
+        /// </summary>
         public IAddressResolver AddressResolver { get; set; }
+
+        /// <summary>
+        /// ClientProvidedName is a string that identifies the client connection.
+        /// It is used in the management UI and in the connection details.
+        /// </summary>
+
         public string ClientProvidedName { get; set; } = "dotnet-stream-locator";
 
+        /// <summary>
+        /// Authentication mechanism. Default is <see cref="AuthMechanism.Plain"/>.
+        /// </summary>
         public AuthMechanism AuthMechanism { get; set; } = AuthMechanism.Plain;
 
         /// <summary>
         ///  Configure the connection pool for producers and consumers.
+        /// See <see cref="ConnectionPoolConfig"/> for more details about the configuration options.
         /// </summary>
         public ConnectionPoolConfig ConnectionPoolConfig { get; set; } = new();
 
@@ -59,12 +94,22 @@ namespace RabbitMQ.Stream.Client
 
         /// <summary>
         /// See <see cref="SocketOptions"/> for configurable TCP socket options for a connection. Use this to tune buffer sizes,
-        /// Nagle's algorithm, linger on close, and TCP keep-alive.
+        /// Nagle's algorithm, and linger on close.
         /// </summary>
         public SocketOptions SocketOptions { get; set; } = null;
+
+        /// <summary>
+        /// LookupLocatorStrategy see <see cref="ILookupLocatorStrategy"/> for the strategy to reconnect the locator client in case of connection failure.
+        /// </summary>
+        public ILookupLocatorStrategy LookupLocatorStrategy { get; set; } = new BackOffLookupLocatorStrategy();
     }
 
-    public class StreamSystem
+    /// <summary>
+    /// StreamSystem is the main entry point of the client.
+    /// It is responsible for managing the connections to the server and providing methods to create producers and consumers.
+    /// Implements IAsyncDisposable to allow using <c>await using</c> and automatic cleanup producers, consumers.
+    /// </summary>
+    public class StreamSystem : IAsyncDisposable
     {
         private readonly ClientParameters _clientParameters;
         private Client _client;
@@ -88,8 +133,19 @@ namespace RabbitMQ.Stream.Client
                 connectionPoolConfig.ProducersPerConnection, connectionPoolConfig.ConnectionCloseConfig);
         }
 
+        /// <summary>
+        /// Indicates whether the stream system's locator connection is closed.
+        /// </summary>
         public bool IsClosed => _client.IsClosed;
 
+        /// <summary>
+        /// Creates and connects a <see cref="StreamSystem"/> using the given configuration.
+        /// Tries each endpoint in <see cref="StreamSystemConfig.Endpoints"/> until one succeeds.
+        /// </summary>
+        /// <param name="config">Connection and pool configuration.</param>
+        /// <param name="logger">Optional logger for connection and lifecycle events.</param>
+        /// <returns>A connected <see cref="StreamSystem"/> instance.</returns>
+        /// <exception cref="StreamSystemInitialisationException">Thrown when no endpoint could be reached.</exception>
         public static async Task<StreamSystem> Create(StreamSystemConfig config, ILogger<StreamSystem> logger = null)
         {
             config.Validate();
@@ -106,7 +162,8 @@ namespace RabbitMQ.Stream.Client
                 Endpoints = config.Endpoints,
                 AuthMechanism = config.AuthMechanism,
                 RpcTimeOut = config.RpcTimeOut,
-                SocketOptions = config.SocketOptions
+                SocketOptions = config.SocketOptions,
+                LookupLocatorStrategy = config.LookupLocatorStrategy,
             };
             // create the metadata client connection
             foreach (var endPoint in clientParams.Endpoints)
@@ -144,6 +201,9 @@ namespace RabbitMQ.Stream.Client
             throw new StreamSystemInitialisationException("no endpoints could be reached");
         }
 
+        /// <summary>
+        /// Closes the stream system: closes the locator connection and all producer/consumer connection pools.
+        /// </summary>
         public async Task Close()
         {
             await _client.Close("system close").ConfigureAwait(false);
@@ -155,8 +215,9 @@ namespace RabbitMQ.Stream.Client
                 await PoolProducers.Close()
                     .ConfigureAwait(false);
             }
-            catch
+            catch (Exception e)
             {
+                _logger?.LogError(e, "Error closing stream system");
             }
             finally
             {
@@ -164,26 +225,69 @@ namespace RabbitMQ.Stream.Client
                 PoolProducers.Dispose();
             }
 
-            _logger?.LogDebug("Client Closed");
+            _logger?.LogDebug("Stream system closed");
+        }
+
+        /// <summary>
+        /// Disposes the stream system asynchronously, closing all connections and releasing resources.
+        /// Enables <c>await using</c> and automatic cleanup by dependency injection containers.
+        /// </summary>
+        public async ValueTask DisposeAsync()
+        {
+            await Close().ConfigureAwait(false);
+
+            // Suppress finalization.
+            GC.SuppressFinalize(this);
         }
 
         private readonly SemaphoreSlim _semClientProvidedName = new(1);
 
+        /// <summary>
+        /// MayBeReconnectLocator tries to reconnect the locator client if the connection is closed.
+        /// Reconnection is needed in case of network issues or server rebooting.
+        /// The method will try to reconnect to all the endpoints before giving up and throwing an exception.
+        /// </summary>
         private async Task MayBeReconnectLocator()
         {
-            var advId = Random.Shared.Next(0, _clientParameters.Endpoints.Count);
+            // if we are here, at least one endpoint was reachable,
+            // the first connection was successful,
+            // but then the connection was closed.
+            // We try to reconnect to all the endpoints before giving up.
+            // We could have a load balancer in front of the cluster.
+            var maxAttempts = _clientParameters.LookupLocatorStrategy.MaxAttempts;
 
             try
             {
                 await _semClientProvidedName.WaitAsync().ConfigureAwait(false);
                 if (_client.IsClosed)
                 {
-                    _client = await Client.Create(_client.Parameters with
+                    var retryCount = 0;
+                    var advId = Random.Shared.Next(0, _clientParameters.Endpoints.Count);
+                    while (retryCount < maxAttempts)
                     {
-                        ClientProvidedName = _clientParameters.ClientProvidedName,
-                        Endpoint = _clientParameters.Endpoints[advId]
-                    }).ConfigureAwait(false);
-                    _logger?.LogDebug("Locator reconnected to {@EndPoint}", _clientParameters.Endpoints[advId]);
+                        try
+                        {
+                            retryCount++;
+                            _client = await Client.Create(_client.Parameters with
+                            {
+                                ClientProvidedName = _clientParameters.ClientProvidedName,
+                                Endpoint = _clientParameters.Endpoints[advId]
+                            }).ConfigureAwait(false);
+                            _logger?.LogDebug("Locator reconnected to {@EndPoint}", _clientParameters.Endpoints[advId]);
+                            break;
+                        }
+                        catch (Exception e)
+                        {
+                            var delay = _clientParameters.LookupLocatorStrategy.Delay;
+                            _logger?.LogError(e,
+                                "Failed to reconnect locator to {@EndPoint}, will retry again. Retry count: {@retryCount} in {@Delay}",
+                                _clientParameters.Endpoints[advId], retryCount, delay);
+                            await Task.Delay(_clientParameters.LookupLocatorStrategy.Delay).ConfigureAwait(false);
+                            advId = (advId + 1) % _clientParameters.Endpoints.Count;
+                            if (retryCount >= maxAttempts)
+                                throw;
+                        }
+                    }
                 }
             }
             finally
@@ -192,12 +296,23 @@ namespace RabbitMQ.Stream.Client
             }
         }
 
+        /// <summary>
+        /// Stores an offset for a consumer on a stream. Used for offset tracking and recovery.
+        /// </summary>
+        /// <param name="reference">Consumer reference (name) that committed the offset.</param>
+        /// <param name="stream">Stream name.</param>
+        /// <param name="offsetValue">The offset value to store.</param>
         public async Task StoreOffset(string reference, string stream, ulong offsetValue)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
             await _client.StoreOffset(reference, stream, offsetValue).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Updates the connection secret (password) for the stream system and all its producer/consumer connections.
+        /// </summary>
+        /// <param name="newSecret">The new password to use.</param>
+        /// <exception cref="UpdateSecretFailureException">Thrown when the locator connection is closed and the update cannot be applied.</exception>
         public async Task UpdateSecret(string newSecret)
         {
             // store the old password just in case it will fail to update the secret
@@ -220,6 +335,13 @@ namespace RabbitMQ.Stream.Client
             await PoolProducers.UpdateSecrets(newSecret).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Creates a raw super stream producer that publishes to a super stream using the given config and routing.
+        /// </summary>
+        /// <param name="rawSuperStreamProducerConfig">Producer configuration including super stream name and routing.</param>
+        /// <param name="logger">Optional logger.</param>
+        /// <returns>An <see cref="ISuperStreamProducer"/> for the super stream.</returns>
+        /// <exception cref="CreateProducerException">Thrown when the super stream name is empty, batch size is invalid, routing is null, or metadata query fails.</exception>
         public async Task<ISuperStreamProducer> CreateRawSuperStreamProducer(
             RawSuperStreamProducerConfig rawSuperStreamProducerConfig, ILogger logger = null)
         {
@@ -279,8 +401,11 @@ namespace RabbitMQ.Stream.Client
         }
 
         /// <summary>
-        /// Returns the list of partitions for a given super stream
+        /// Returns the list of partitions stream names for a given super stream.
         /// </summary>
+        /// <param name="superStream">The super stream name.</param>
+        /// <returns>Array of partition stream names.</returns>
+        /// <exception cref="QueryException">Thrown when the metadata query fails.</exception>
         public async Task<string[]> QueryPartition(string superStream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -293,6 +418,13 @@ namespace RabbitMQ.Stream.Client
             return partitions.Streams;
         }
 
+        /// <summary>
+        /// Creates a super stream consumer that consumes from all partitions of a super stream.
+        /// </summary>
+        /// <param name="rawSuperStreamConsumerConfig">Consumer configuration including super stream name and reference.</param>
+        /// <param name="logger">Optional logger.</param>
+        /// <returns>An <see cref="ISuperStreamConsumer"/> for the super stream.</returns>
+        /// <exception cref="CreateConsumerException">Thrown when the super stream name is empty or metadata query fails.</exception>
         public async Task<ISuperStreamConsumer> CreateSuperStreamConsumer(
             RawSuperStreamConsumerConfig rawSuperStreamConsumerConfig,
             ILogger logger = null)
@@ -338,6 +470,13 @@ namespace RabbitMQ.Stream.Client
             }
         }
 
+        /// <summary>
+        /// Creates a raw producer for a single stream.
+        /// </summary>
+        /// <param name="rawProducerConfig">Producer configuration including stream name and batch size.</param>
+        /// <param name="logger">Optional logger.</param>
+        /// <returns>An <see cref="IProducer"/> for the stream.</returns>
+        /// <exception cref="CreateProducerException">Thrown when batch size is invalid or stream metadata is unavailable.</exception>
         public async Task<IProducer> CreateRawProducer(RawProducerConfig rawProducerConfig,
             ILogger logger = null)
         {
@@ -371,10 +510,15 @@ namespace RabbitMQ.Stream.Client
             }
         }
 
+        /// <summary>
+        /// Retrieves metadata for a stream (leader and replicas). Used internally when creating producers/consumers.
+        /// </summary>
+        /// <param name="streamName">The stream name.</param>
+        /// <returns>Stream metadata including response code and broker information.</returns>
         public async Task<StreamInfo> StreamInfo(string streamName)
         {
             // force localhost connection for single node clusters and when address resolver is not provided
-            // when theres 1 endpoint and an address resolver, there could be a cluster behind a load balancer
+            // when there is 1 endpoint and an address resolver, there could be a cluster behind a load balancer
             var forceLocalHost = false;
             var localPort = 0;
             var localHostOrAddress = "";
@@ -415,6 +559,11 @@ namespace RabbitMQ.Stream.Client
             return metaStreamInfo;
         }
 
+        /// <summary>
+        /// Creates a stream with the given specification (name and optional arguments).
+        /// </summary>
+        /// <param name="spec">Stream specification (name and optional arguments).</param>
+        /// <exception cref="CreateStreamException">Thrown when the server returns an error other than Ok or StreamAlreadyExists.</exception>
         public async Task CreateStream(StreamSpec spec)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -427,6 +576,11 @@ namespace RabbitMQ.Stream.Client
             throw new CreateStreamException($"Failed to create stream, error code: {response.ResponseCode.ToString()}");
         }
 
+        /// <summary>
+        /// Creates a super stream with the given specification (name, partitions, optional binding keys and arguments).
+        /// </summary>
+        /// <param name="spec">Super stream specification.</param>
+        /// <exception cref="CreateStreamException">Thrown when the server returns an error other than Ok or StreamAlreadyExists.</exception>
         public async Task CreateSuperStream(SuperStreamSpec spec)
         {
             spec.Validate();
@@ -442,6 +596,11 @@ namespace RabbitMQ.Stream.Client
             throw new CreateStreamException($"Failed to create stream, error code: {response.ResponseCode.ToString()}");
         }
 
+        /// <summary>
+        /// Checks whether a stream exists.
+        /// </summary>
+        /// <param name="stream">Stream name.</param>
+        /// <returns>True if the stream exists, false otherwise.</returns>
         public async Task<bool> StreamExists(string stream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -456,6 +615,11 @@ namespace RabbitMQ.Stream.Client
             }
         }
 
+        /// <summary>
+        /// Checks whether a super stream exists.
+        /// </summary>
+        /// <param name="superStream">Super stream name.</param>
+        /// <returns>True if the super stream exists, false otherwise.</returns>
         public async Task<bool> SuperStreamExists(string superStream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -479,27 +643,31 @@ namespace RabbitMQ.Stream.Client
         }
 
         /// <summary>
-        /// QueryOffset retrieves the last consumer offset stored
-        /// given a consumer name and stream name 
+        /// Retrieves the last consumer offset stored for the given consumer reference and stream.
         /// </summary>
-        /// <param name="reference">Consumer name</param>
-        /// <param name="stream">Stream name</param>
-        /// <returns></returns>
+        /// <param name="reference">Consumer reference (name).</param>
+        /// <param name="stream">Stream name.</param>
+        /// <returns>The last stored offset for the consumer on the stream.</returns>
+        /// <exception cref="OffsetNotFoundException">Thrown when no offset has been stored for this consumer and stream.</exception>
         public async Task<ulong> QueryOffset(string reference, string stream)
         {
+            await MayBeReconnectLocator().ConfigureAwait(false);
             var offset = await TryQueryOffset(reference, stream).ConfigureAwait(false);
             return offset ??
                    throw new OffsetNotFoundException($"QueryOffset stream: {stream}, reference: {reference}");
         }
 
         /// <summary>
-        /// TryQueryOffset tries to retrieve the last consumer offset stored
-        /// given a consumer name and stream name.
-        /// Returns null if the offset is not found.
+        /// Tries to retrieve the last consumer offset stored for the given consumer reference and stream.
+        /// Returns null if no offset has been stored (avoids throwing <see cref="OffsetNotFoundException"/>).
         /// </summary>
+        /// <param name="reference">Consumer reference (name).</param>
+        /// <param name="stream">Stream name.</param>
+        /// <returns>The last stored offset, or null if not found.</returns>
         public async Task<ulong?> TryQueryOffset(string reference, string stream)
         {
             MaybeThrowQueryException(reference, stream);
+            await MayBeReconnectLocator().ConfigureAwait(false);
 
             var response = await _client.QueryOffset(reference, stream).ConfigureAwait(false);
 
@@ -515,12 +683,11 @@ namespace RabbitMQ.Stream.Client
         }
 
         /// <summary>
-        /// QuerySequence retrieves the last publishing ID
-        /// given a producer name and stream 
+        /// Retrieves the last publishing sequence (ID) for the given producer reference and stream.
         /// </summary>
-        /// <param name="reference">Producer name</param>
-        /// <param name="stream">Stream name</param>
-        /// <returns></returns>
+        /// <param name="reference">Producer reference (name).</param>
+        /// <param name="stream">Stream name.</param>
+        /// <returns>The last published sequence number.</returns>
         public async Task<ulong> QuerySequence(string reference, string stream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -531,6 +698,11 @@ namespace RabbitMQ.Stream.Client
             return response.Sequence;
         }
 
+        /// <summary>
+        /// Deletes a stream and its data.
+        /// </summary>
+        /// <param name="stream">Stream name to delete.</param>
+        /// <exception cref="DeleteStreamException">Thrown when the server returns an error.</exception>
         public async Task DeleteStream(string stream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -543,6 +715,11 @@ namespace RabbitMQ.Stream.Client
             throw new DeleteStreamException($"Failed to delete stream, error code: {response.ResponseCode.ToString()}");
         }
 
+        /// <summary>
+        /// Deletes a super stream and all its partition streams.
+        /// </summary>
+        /// <param name="superStream">Super stream name to delete.</param>
+        /// <exception cref="DeleteStreamException">Thrown when the server returns an error.</exception>
         public async Task DeleteSuperStream(string superStream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -556,6 +733,11 @@ namespace RabbitMQ.Stream.Client
                 $"Failed to delete super stream, error code: {response.ResponseCode.ToString()}");
         }
 
+        /// <summary>
+        /// Retrieves statistics for a stream (e.g. first offset, last offset, length).
+        /// </summary>
+        /// <param name="stream">Stream name.</param>
+        /// <returns>Stream statistics.</returns>
         public async Task<StreamStats> StreamStats(string stream)
         {
             await MayBeReconnectLocator().ConfigureAwait(false);
@@ -565,6 +747,13 @@ namespace RabbitMQ.Stream.Client
             return new StreamStats(response.Statistic, stream);
         }
 
+        /// <summary>
+        /// Creates a raw consumer for a single stream.
+        /// </summary>
+        /// <param name="rawConsumerConfig">Consumer configuration including stream name and reference.</param>
+        /// <param name="logger">Optional logger.</param>
+        /// <returns>An <see cref="IConsumer"/> for the stream.</returns>
+        /// <exception cref="CreateConsumerException">Thrown when the stream does not exist or metadata is unavailable.</exception>
         public async Task<IConsumer> CreateRawConsumer(RawConsumerConfig rawConsumerConfig,
             ILogger logger = null)
         {
@@ -589,8 +778,22 @@ namespace RabbitMQ.Stream.Client
                 _semClientProvidedName.Release();
             }
         }
+
+        /// <summary>
+        /// Returns the server properties as a dictionary of key-value pairs.
+        /// Useful for debugging and monitoring.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<IDictionary<string, string>> ServerProperties()
+        {
+            await MayBeReconnectLocator().ConfigureAwait(false);
+            return _client.ServerProperties;
+        }
     }
 
+    /// <summary>
+    /// Base exception for entity creation failures (producer/consumer), optionally carrying a <see cref="ResponseCode"/>.
+    /// </summary>
     public class CreateException : Exception
     {
         protected CreateException(string s, ResponseCode responseCode) : base(s)
@@ -605,6 +808,7 @@ namespace RabbitMQ.Stream.Client
         public ResponseCode ResponseCode { get; init; }
     }
 
+    /// <summary>Exception thrown when consumer creation fails.</summary>
     public class CreateConsumerException : CreateException
     {
         public CreateConsumerException(string s, ResponseCode responseCode) : base(s, responseCode)
@@ -616,6 +820,7 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>Exception thrown when stream or super stream creation fails.</summary>
     public class CreateStreamException : Exception
     {
         public CreateStreamException(string s) : base(s)
@@ -623,6 +828,7 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>Exception thrown when stream or super stream deletion fails.</summary>
     public class DeleteStreamException : Exception
     {
         public DeleteStreamException(string s) : base(s)
@@ -630,6 +836,7 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>Exception thrown when a metadata or partition query fails.</summary>
     public class QueryException : Exception
     {
         public QueryException(string s) : base(s)
@@ -637,6 +844,7 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>Exception thrown when producer creation fails.</summary>
     public class CreateProducerException : CreateException
     {
         public CreateProducerException(string s, ResponseCode responseCode) : base(s, responseCode)
@@ -648,6 +856,9 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>
+    /// Strategy for choosing which stream replica (leader) to use when multiple are available.
+    /// </summary>
     public readonly struct LeaderLocator
     {
         private readonly string _value;
@@ -657,8 +868,13 @@ namespace RabbitMQ.Stream.Client
             _value = value;
         }
 
+        /// <summary>Prefer the leader on the same node as the client connection.</summary>
         public static LeaderLocator ClientLocal => new("client-local");
+
+        /// <summary>Choose a leader at random.</summary>
         public static LeaderLocator Random => new("random");
+
+        /// <summary>Prefer the node that is currently leader for the fewest streams.</summary>
         public static LeaderLocator LeastLeaders => new("least-leaders");
 
         public override string ToString()
@@ -667,6 +883,7 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>Exception thrown when <see cref="StreamSystem.Create"/> cannot connect to any configured endpoint.</summary>
     public class StreamSystemInitialisationException : Exception
     {
         public StreamSystemInitialisationException(string error) : base(error)
@@ -674,6 +891,7 @@ namespace RabbitMQ.Stream.Client
         }
     }
 
+    /// <summary>Exception thrown when <see cref="StreamSystem.UpdateSecret"/> fails (e.g. connection is closed).</summary>
     public class UpdateSecretFailureException : ProtocolException
     {
         public UpdateSecretFailureException(string s)

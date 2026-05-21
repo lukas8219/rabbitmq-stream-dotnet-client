@@ -74,7 +74,7 @@ namespace RabbitMQ.Stream.Client
         public SslOption Ssl { get; set; } = new SslOption();
 
         /// <summary>
-        /// TCP socket options (buffer sizes, NoDelay, KeepAlive, Linger). When null, library defaults are used.
+        /// TCP socket options (buffer sizes, NoDelay, Linger). When null, library defaults are used.
         /// </summary>
         public SocketOptions SocketOptions { get; set; }
 
@@ -83,6 +83,8 @@ namespace RabbitMQ.Stream.Client
         public AuthMechanism AuthMechanism { get; set; } = AuthMechanism.Plain;
 
         public TimeSpan RpcTimeOut { get; set; } = TimeSpan.FromSeconds(10);
+
+        public ILookupLocatorStrategy LookupLocatorStrategy { get; set; } = new BackOffLookupLocatorStrategy();
 
         internal void FireMetadataUpdate(MetaDataUpdate metaDataUpdate)
         {
@@ -153,6 +155,8 @@ namespace RabbitMQ.Stream.Client
 
         public int IncomingFrames => _connection.NumFrames;
 
+        public IDictionary<string, string> ServerProperties { get; private set; } = new Dictionary<string, string>();
+
         private static readonly object Obj = new();
 
         private readonly ILogger _logger;
@@ -204,7 +208,7 @@ namespace RabbitMQ.Stream.Client
             var peerPropertiesResponse = await client.Request<PeerPropertiesRequest, PeerPropertiesResponse>(corr =>
                 new PeerPropertiesRequest(corr, parameters.Properties)).ConfigureAwait(false);
             logger?.LogDebug("Server properties: {@Properties}", peerPropertiesResponse.Properties);
-
+            client.ServerProperties = peerPropertiesResponse.Properties;
             //auth
             var saslHandshakeResponse =
                 await client

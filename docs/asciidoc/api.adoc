@@ -33,6 +33,16 @@ Note the streamSystem must be closed to release resources when it is no longer n
 Consider the environment like a long-lived object.
 An application will usually create one `StreamSystem` instance when it starts up and close it when it exits.
 
+.Creating an environment with disposable pattern
+[source,c#,indent=0]
+--------
+include::{test-examples}/StreamSystemUsage.cs[tag=create-disposable]
+--------
+
+`StreamSystem` implements `IAsyncDisposable`, so you can use the `using` statement to automatically close it after usage.
+
+
+
 It is possible to use a multiple end-points to connect to a cluster of nodes.
 The:
 
@@ -68,6 +78,7 @@ include::{test-examples}/StreamSystemUsage.cs[tag=create-tls]
 <1> Enable TLS
 <2> Load certificates from PEM files
 
+[[create-tls-external-auth]]
 .Creating an StreamSystem that uses TLS and external authentication
 [source,c#,indent=0]
 --------
@@ -112,7 +123,7 @@ The following table sums up the main settings to create an `StreamSystem` using 
 |`/`
 
 |`ClientProvidedName`
-| To identify the client in the management UI.
+|To identify the client in the management UI.
 |`dotnet-stream-locator`
 
 |`Heartbeat`
@@ -124,14 +135,25 @@ The following table sums up the main settings to create an `StreamSystem` using 
 |`localhost:5552`
 
 
-|`addressResolver`
+|`AddressResolver`
 |Contract to change resolved node address to connect to.
 |Pass-through (no-op)
 
+|`AuthMechanism`
+|Authentication mechanism to use (e.g. `Plain` or `External` for TLS client certificates). See <<create-tls-external-auth>> for external authentication.
+|`Plain`
+
 |`Ssl`
 |Configuration helper for TLS.
-|`null`
+|`SslOption` (empty)
 
+|`RpcTimeOut`
+|Timeout for RPC calls (e.g. PeerProperties, QueryMetadata). Must be at least 1 second. Low values can cause false errors.
+|`10 seconds`
+
+|`LookupLocatorStrategy`
+|Strategy to reconnect the locator client in case of connection failure. See `ILookupLocatorStrategy`.
+|`BackOffLookupLocatorStrategy`
 
 |`ConnectionPoolConfig`
 |Define the connection pool policies. See <<connection-pool,Connection Pool>> for more details.
@@ -139,9 +161,42 @@ The following table sums up the main settings to create an `StreamSystem` using 
 
 |`SocketOptions`
 |The <<socket-options, socket options>> to use for the connections.
-|`null` provide default socket options
+|`null` (default socket options)
 
 |===
+
+[[logging-ilogger]]
+===== Logging (ILogger)
+
+The client uses the standard .NET logging abstraction `Microsoft.Extensions.Logging.ILogger` from the `Microsoft.Extensions.Logging.Abstractions` package.
+Logging is optional: when no logger is provided, the client uses a no-op logger and does not emit any log output.
+
+The following factory methods accept an optional `ILogger` (or `ILogger<T>`) parameter:
+
+* `StreamSystem.Create(StreamSystemConfig config, ILogger<StreamSystem> logger = null)` – logger for the stream system
+* `Producer.Create(ProducerConfig producerConfig, ILogger<Producer> logger = null)` – reliable producer
+* `Consumer.Create(ConsumerConfig consumerConfig, ILogger<Consumer> logger = null)` – reliable consumer
+* `StreamSystem.CreateRawProducer(RawProducerConfig rawProducerConfig, ILogger logger = null)` – raw producer
+* `StreamSystem.CreateRawConsumer(RawConsumerConfig rawConsumerConfig, ILogger logger = null)` – raw consumer
+* `StreamSystem.CreateRawSuperStreamProducer(RawSuperStreamProducerConfig rawSuperStreamProducerConfig, ILogger logger = null)` – super stream producer
+* `StreamSystem.CreateSuperStreamConsumer(RawSuperStreamConsumerConfig rawSuperStreamConsumerConfig, ILogger logger = null)` – super stream consumer
+
+A concrete logging implementation (for example `Microsoft.Extensions.Logging.Console`) is not shipped with the client; you add the logging packages you need to your application.
+
+Example: configuring a logger with `LoggerFactory` and passing it when creating the stream system and producers/consumers:
+
+.Configuring ILogger with LoggerFactory
+[source,c#,indent=0]
+--------
+include::{test-examples}/GettingStarted.cs[tag=sample-logging]
+--------
+
+<1> Create a logger for the reliable producer
+<2> Create a logger for the reliable consumer
+<3> Create a logger for the stream system
+
+Use the same logger (or category) when creating the `StreamSystem` and the producers/consumers so that connection and protocol events are visible in your logs.
+You can filter by the `RabbitMQ.Stream` namespace to control verbosity.
 
 [[socket-options]]
 ===== Socket Options
@@ -151,7 +206,6 @@ Default is `null` with the default values:
  socket.NoDelay = true;
  socket.SendBufferSize *= SocketOptions.DefaultBufferSizeMultiplier;
  socket.ReceiveBufferSize *= SocketOptions.DefaultBufferSizeMultiplier;
- socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
 ```
 
 [[connection-pool]]
@@ -389,6 +443,10 @@ The following table sums up the main settings to create a `ProducerConfig`:
 |The TCP connection name to identify the client.
 |`dotnet-stream-producer`
 
+|`Filter`
+|Function used to set the value of the filter. The filter enables the server to filter the messages sent to the consumer.
+|`null`
+
 |`MaxInFlight`
 |The maximum number of messages that can be in flight at any given time. Messages sent - Messages confirmed. To avoid to flood the broker with messages.
 |1000
@@ -397,6 +455,14 @@ The following table sums up the main settings to create a `ProducerConfig`:
 |The strategy to use when the connection to the broker is lost.
 |`BackOffReconnectStrategy`
 
+|`ResourceAvailableReconnectStrategy`
+|The strategy to check if the stream is available (e.g. during broker restart). From `ReliableConfig`.
+|`null`
+
+|`Identifier`
+|Identifies the entity in logs. From `ReliableConfig`. No effect on the server.
+|`null`
+
 |`MessagesBufferSize`
 |Number of the messages sent for each frame-send.
 This value is valid only for the `Send(Message)` method.
@@ -404,7 +470,7 @@ This value is valid only for the `Send(Message)` method.
 
 |`TimeoutMessageAfter`
 |Time to wait before considering a message as not confirmed.
-| 3 seconds
+|10 seconds
 
 |`SuperStreamConfig`
 |The super stream configuration.
@@ -525,7 +591,7 @@ Any long processing should be done in a separate thread (e.g. with an asynchrono
 ====
 You can mix different send methods.
 For example you can send a message with `send(Message)` and then send a batch of messages with `send(List<Message>)`.
-Avoid to sent the `Refence` property in the `ProducerConfig` it enables the deduplication and you could have unexpected results.
+Avoid setting the `Reference` property in the `ProducerConfig`; it enables deduplication and you could have unexpected results.
 
 `Reference` is deprecated in the version `1.2.0`  see deduplication section for more details.
 ====
@@ -817,21 +883,44 @@ The following table sums up the main settings to create a `Consumer` with `Consu
 |`BackOffReconnectStrategy`
 
 |`ClientProvidedName`
-| To identify the client in the management UI
-|`dotnet-stream-conusmer`
-
+|To identify the client in the management UI.
+|`dotnet-stream-consumer`
 
 |`IsSingleActiveConsumer`
-|Enable the Single Active Consumer feature
+|Enable the Single Active Consumer feature.
 |`false`
 
 |`IsSuperStream`
-|Enable the Super Stream feature
+|Enable the Super Stream feature.
 |`false`
 
-|`ICrc32`
-|The <<crc-on-delivery,CRC32 implementation>> to use to validate the chunk server crc32 .
-| `StreamCrc32()`
+|`ConsumerUpdateListener`
+|Callback invoked when the consumer becomes active (single active consumer only). Lets the consumer decide where to start consuming from. See <<consumer-update-listener,Reacting to Consumer State Change>>.
+|`null`
+
+|`InitialCredits`
+|Initial number of chunks the consumer will receive before requesting more. Higher values can increase throughput but use more memory.
+|`2`
+
+|`Filter`
+|Consumer filter to receive only messages matching the filter (bloom filter with optional post-filter).
+|`null`
+
+|`FlowControl`
+|Strategy for when the broker sends more messages. See <<consumer-flow-control,Flow Control>>.
+|`new FlowControl()` (default strategy)
+
+|`Crc32`
+|The <<crc-on-delivery,CRC32 implementation>> to use to validate the chunk server crc32.
+|`StreamCrc32()`
+
+|`ResourceAvailableReconnectStrategy`
+|The strategy to check if the stream is available (e.g. during broker restart). From `ReliableConfig`.
+|default back-off
+
+|`Identifier`
+|Identifies the entity in logs and UI. From `ReliableConfig`. No effect on the server.
+|`null`
 
 |`StatusChanged`
 |The callback invoked when the consumer status changes. See <<entity-status,Consumer Status>> for more details.

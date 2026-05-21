@@ -1,4 +1,4 @@
-﻿// This source code is dual-licensed under the Apache License, version
+// This source code is dual-licensed under the Apache License, version
 // 2.0, and the Mozilla Public License, version 2.0.
 // Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 
@@ -110,7 +110,7 @@ public class BestPracticesClient
                     // you can change them if you want to optimize the performance of the producer and consumer.
                     // SocketOptions = new SocketOptions()
                     // {
-                    //    // KeepAlive = true,
+                    //    // NoDelay = true,
                     //
                     // },
                     ConnectionPoolConfig = new ConnectionPoolConfig()
@@ -199,7 +199,7 @@ public class BestPracticesClient
                         Reference = "myApp", // needed for the Single Active Consumer or fot the store offset 
                         // can help to identify the consumer on the logs and RabbitMQ Management
                         Identifier = $"my_consumer_{z}",
-                        InitialCredits = 10,
+                        InitialCredits = 2,
                         MessageHandler = (source, consumer, ctx, _) =>
                         {
                             // if (totalConsumed % 10_000 == 0)
@@ -215,7 +215,8 @@ public class BestPracticesClient
                     };
 
                     // This is the callback that will be called when the consumer status changes
-                    // DON'T PUT ANY BLOCKING CODE HERE
+                    // DON'T PUT ANY BLOCKING CODE HERE and NOT SAFE code since it will be called by the
+                    // internal thread of the consumer and it could cause performance issues or even deadlocks
                     conf.StatusChanged += (status) =>
                     {
                         var streamInfo = $"Stream: {status.Stream}";
