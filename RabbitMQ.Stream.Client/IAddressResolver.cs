@@ -3,11 +3,12 @@
 // Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 
 using System.Net;
+using System.Threading.Tasks;
 
 namespace RabbitMQ.Stream.Client;
 
 public interface IAddressResolver
 {
     public bool Enabled { get; }
-    public EndPoint Resolve(string address, int host);
+    public Task<EndPoint> ResolveAsync(string address, int port);
 }

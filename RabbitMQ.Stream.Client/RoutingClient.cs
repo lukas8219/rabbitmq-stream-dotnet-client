@@ -79,7 +79,7 @@ namespace RabbitMQ.Stream.Client
             // here it means that there is a AddressResolver configuration
             // so there is a load-balancer or proxy we need to get the right connection
             // as first we try with the first node given from the LB
-            var endPoint = clientParameters.AddressResolver.Resolve(broker.Host, (int)broker.Port);
+            var endPoint = await clientParameters.AddressResolver.ResolveAsync(broker.Host, (int)broker.Port).ConfigureAwait(false);
             var client = await routing
                 .CreateClient(
                     clientParameters with
@@ -94,8 +94,10 @@ namespace RabbitMQ.Stream.Client
 
             var attemptNo = 0;
             while (broker.Host != advertisedHost || broker.Port != uint.Parse(advertisedPort))
+
             {
-                logger?.LogDebug(
+                endPoint = await clientParameters.AddressResolver.ResolveAsync(broker.Host, (int)broker.Port).ConfigureAwait(false);
+                logger?.LogInformation(
                     "advertised_host or advertised_port doesn't match. Expected: {ExpectedHost}:{ExpectedPort}, " +
                     "Actual: {AdvertisedHost}:{AdvertisedPort}. Attempt number: {AttemptNo}/{MaxAttempts}",
                     broker.Host, broker.Port, advertisedHost, advertisedPort, attemptNo, maxAttempts);

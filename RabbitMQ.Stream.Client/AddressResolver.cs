@@ -2,7 +2,9 @@
 // 2.0, and the Mozilla Public License, version 2.0.
 // Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 
+using System;
 using System.Net;
+using System.Threading.Tasks;
 
 namespace RabbitMQ.Stream.Client
 {
@@ -16,6 +18,8 @@ namespace RabbitMQ.Stream.Client
 
         public EndPoint EndPoint { get; set; }
         public bool Enabled { get; set; }
-        public EndPoint Resolve(string address, int host) => EndPoint;
+        [Obsolete("Deprecated. Use ResolveAsync instead.")]
+        public EndPoint Resolve(string address, int port) => EndPoint;
+        public async Task<EndPoint> ResolveAsync(string address, int port) => EndPoint;
     }
 }
