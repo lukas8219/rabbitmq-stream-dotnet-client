@@ -21,6 +21,9 @@ changelog:
     - title: 📚 Documentation
       labels:
         - documentation
+    - title: 🪫 Deprecation
+      labels:
+        - deprecation
     - title: 🔄 Dependency Updates
       labels:
         - dependencies
